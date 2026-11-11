@@ -1,0 +1,69 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Kiểm tra người dùng đã đăng nhập
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Kiểm tra quyền Admin hợp lệ:
+    // 1. Có Custom Claim `admin == true` trên Firebase Auth Token, HOẶC
+    // 2. Có document định danh trong `/admins/{uid}` và không bị vô hiệu hóa
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.admin == true ||
+        (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('disabled', false) != true &&
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('active', true) != false
+        )
+      );
+    }
+
+    // Kiểm tra cấu trúc dữ liệu nghiêm ngặt:
+    // - ĐÚNG 4 KHÓA: email, matkhau, hoten, hinhanh
+    // - `matkhau` BẮT BUỘC LÀ `null`
+    // - Giới hạn kích thước trường và tổng dữ liệu an toàn (< 750 KB)
+    function isValidUserPayload(data) {
+      return data.keys().hasOnly(['email', 'matkhau', 'hoten', 'hinhanh']) &&
+             data.keys().hasAll(['email', 'matkhau', 'hoten', 'hinhanh']) &&
+             data.email is string &&
+             data.email.size() > 3 &&
+             data.email.size() <= 254 &&
+             data.matkhau == null &&
+             data.hoten is string &&
+             data.hoten.size() >= 2 &&
+             data.hoten.size() <= 150 &&
+             data.hinhanh is string &&
+             data.hinhanh.size() > 0 &&
+             data.hinhanh.size() <= 716800 &&
+             (data.email.size() + data.hoten.size() + data.hinhanh.size()) <= 760000;
+    }
+
+    // Bảng phân quyền Quản trị viên:
+    // Chỉ cho phép user đọc đúng document `/admins/{uid}` của chính mình để kiểm tra quyền.
+    // Tuyệt đối cấm client tự tạo, sửa, xóa hoặc liệt kê danh sách Admin.
+    match /admins/{adminUid} {
+      allow get: if isSignedIn() && request.auth.uid == adminUid;
+      allow list, create, update, delete: if false;
+    }
+
+    // Bảng dữ liệu Người dùng chính (4 trường: email, matkhau, hoten, hinhanh):
+    // Mọi thao tác quản lý người dùng (read, create, update, delete) CHỈ cho phép Admin hợp lệ.
+    match /users/{userId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidUserPayload(request.resource.data);
+      allow update: if isAdmin() &&
+                    isValidUserPayload(request.resource.data) &&
+                    request.resource.data.email == resource.data.email;
+      allow delete: if isAdmin();
+    }
+
+    // Từ chối toàn bộ các truy cập vào collection khác
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
